@@ -1,0 +1,13 @@
+open the environment created:
+env\Scripts\activate 
+
+download ollama and run it:
+https://ollama.com/download 
+ollama run phi (make this run on a separate window)
+
+install modules:
+pip install speechrecognition pyttsx3 pyaudio requests pyinstaller pipwin
+pip install customtkinter
+
+
+
