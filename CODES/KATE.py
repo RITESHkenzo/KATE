@@ -29,30 +29,46 @@ def say(text):
 # listen
 def listen():
     r = sr.Recognizer()
+    r.energy_threshold = 100
+    r.dynamic_energy_threshold = True
+
     with sr.Microphone() as source:
         print("Listening...")
         set_status("Listening...")
         r.adjust_for_ambient_noise(source, duration=1)
-        audio = r.listen(source)
+
+        try:
+            audio = r.listen(source, timeout=5, phrase_time_limit=5)
+        except:
+            return ""
 
     try:
         q = r.recognize_google(audio, language="en-in")
-        q = q.lower()
+        q = q.lower().strip()
         print("Heard:", q)
         return q
     except:
         print("Not clear")
         return ""
 
-# wake word = h or o
+# wake + direct command
 def wake():
     while True:
         q = listen()
         print("Wake heard:", q)
 
-        if "h" in q or "o" in q:
+        if not q:
+            continue
+
+        # if user says wake word
+        if "hi" in q:
             say("yes")
-            break
+            return None
+
+        # if user directly gives command
+        if any(word in q for word in ["open", "play", "time", "google", "youtube"]):
+            print("Direct command detected")
+            return q
 
 # AI
 def chat(q):
@@ -74,7 +90,7 @@ def chat(q):
     except:
         say("ai error")
 
-# apps
+# open apps
 def open_app(app):
     os.system("start " + app)
     say("opening " + app)
@@ -101,12 +117,11 @@ def play(q):
     subprocess.Popen("start spotify:search:" + song, shell=True)
     say("playing " + song)
 
-# commands
+# handle commands
 def handle(q):
+    q = q.lower().strip()
     print("FINAL COMMAND:", q)
     box.insert("end", "\nYou: " + q + "\n")
-
-    q = q.replace("from", "chrome")
 
     if "youtube" in q:
         webbrowser.open("https://youtube.com")
@@ -143,16 +158,19 @@ def run():
 
     while True:
         set_status("Waiting...")
-        wake()
+        result = wake()
 
-        time.sleep(1)
-
+        time.sleep(0.3)
         set_status("Processing...")
-        q = listen()
 
-        print("After wake:", q)
+        if result is None:
+            q = listen()   # after "hey kate"
+        else:
+            q = result     # direct command
 
-        if q != "":
+        print("Final command:", q)
+
+        if q:
             handle(q)
         else:
             print("No command")
