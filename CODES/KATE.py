@@ -9,37 +9,42 @@ import threading
 import time
 import customtkinter as ctk
 
-engine = pyttsx3.init()
-engine.setProperty('rate', 170)
+r = sr.Recognizer()
+r.energy_threshold = 300
+r.dynamic_energy_threshold = True
+mic = sr.Microphone()
 
-chatStr = ""
+MAX_TURNS = 10
+conversation: list[dict] = []
 
-# UI status
-def set_status(text):
-    status.configure(text=text)
+def set_status(text: str):
+    root.after(0, lambda: status.configure(text=text))
 
-# speak
-def say(text):
+def log(text: str):
+    root.after(0, lambda: (box.insert("end", text + "\n"), box.see("end")))
+
+def say(text: str):
     print("KATE:", text)
-    box.insert("end", "KATE: " + text + "\n")
-    box.see("end")
-    engine.say(text)
-    engine.runAndWait()
+    log("KATE: " + text)
 
-# listen
-def listen():
-    r = sr.Recognizer()
-    r.energy_threshold = 100
-    r.dynamic_energy_threshold = True
+    def _speak():
+        engine = pyttsx3.init()
+        engine.setProperty("rate", 170)
+        engine.say(text)
+        engine.runAndWait()
 
-    with sr.Microphone() as source:
+    threading.Thread(target=_speak, daemon=True).start()
+
+def listen() -> str:
+    with mic as source:
         print("Listening...")
         set_status("Listening...")
-        r.adjust_for_ambient_noise(source, duration=1)
-
         try:
             audio = r.listen(source, timeout=5, phrase_time_limit=5)
-        except:
+        except sr.WaitTimeoutError:
+            return ""
+        except OSError as e:
+            print(f"Microphone error: {e}")
             return ""
 
     try:
@@ -47,11 +52,15 @@ def listen():
         q = q.lower().strip()
         print("Heard:", q)
         return q
-    except:
+    except sr.UnknownValueError:
         print("Not clear")
         return ""
+    except sr.RequestError as e:
+        print(f"Recognition service error: {e}")
+        return ""
 
-# wake + direct command
+DIRECT_KEYWORDS = ("open", "play", "time", "google", "youtube", "file")
+
 def wake():
     while True:
         q = listen()
@@ -60,68 +69,93 @@ def wake():
         if not q:
             continue
 
-        # if user says wake word
         if "hi" in q:
             say("yes")
             return None
 
-        # if user directly gives command
-        if any(word in q for word in ["open", "play", "time", "google", "youtube"]):
+        if any(word in q for word in DIRECT_KEYWORDS):
             print("Direct command detected")
             return q
-
-# AI
-def chat(q):
-    global chatStr
+def chat(q: str):
+    global conversation
     set_status("Thinking...")
 
-    chatStr += "User: " + q + "\nKATE: "
+    conversation.append({"role": "user", "content": q})
+
+    # keep at most MAX_TURNS pairs (user + assistant)
+    if len(conversation) > MAX_TURNS * 2:
+        conversation = conversation[-(MAX_TURNS * 2):]
 
     try:
         res = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": "phi", "prompt": chatStr, "stream": False}
+            "http://localhost:11434/api/chat",
+            json={"model": "phi", "messages": conversation, "stream": False},
+            timeout=15,
         )
-
-        ans = res.json()["response"]
+        res.raise_for_status()
+        ans = res.json()["message"]["content"]
+        conversation.append({"role": "assistant", "content": ans})
         say(ans)
-        chatStr += ans + "\n"
 
-    except:
-        say("ai error")
+    except requests.exceptions.ConnectionError:
+        say("I can't reach the AI server. Is Ollama running?")
+    except requests.exceptions.Timeout:
+        say("The AI took too long to respond.")
+    except (KeyError, ValueError) as e:
+        print(f"Unexpected API response: {e}")
+        say("I got a strange response from the AI.")
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP error: {e}")
+        say("There was an error talking to the AI.")
 
-# open apps
-def open_app(app):
-    os.system("start " + app)
+def open_app(app: str):
+    if not app:
+        say("Which app should I open?")
+        return
+    try:
+        os.startfile(app)           # Windows-native, safe
+    except (FileNotFoundError, OSError):
+        # fall back to subprocess with explicit args — no shell interpolation
+        subprocess.Popen(["cmd", "/c", "start", "", app])
     say("opening " + app)
 
-# files
-def files(q):
+
+def files(q: str):
     if "create file" in q:
-        name = q.replace("create file", "").strip() + ".txt"
+        raw_name = q.replace("create file", "").strip()
+        # strip path separators so we can't write outside cwd
+        name = os.path.basename(raw_name) + ".txt"
+        if not name or name == ".txt":
+            say("Please say a file name.")
+            return
         with open(name, "w") as f:
             f.write("made by kate")
-        say("file created")
+        say("file created: " + name)
 
     elif "delete file" in q:
-        name = q.replace("delete file", "").strip()
+        raw_name = q.replace("delete file", "").strip()
+        name = os.path.basename(raw_name)
         if os.path.exists(name):
             os.remove(name)
-            say("deleted")
+            say("deleted " + name)
         else:
-            say("not found")
+            say("file not found")
 
-# spotify
-def play(q):
+def play(q: str):
     song = q.replace("play", "").strip()
-    subprocess.Popen("start spotify:search:" + song, shell=True)
+    if not song:
+        say("What should I play?")
+        return
+    subprocess.Popen(
+        ["cmd", "/c", "start", f"spotify:search:{song}"],
+        shell=False
+    )
     say("playing " + song)
 
-# handle commands
-def handle(q):
+def handle(q: str):
     q = q.lower().strip()
     print("FINAL COMMAND:", q)
-    box.insert("end", "\nYou: " + q + "\n")
+    log("\nYou: " + q)
 
     if "youtube" in q:
         webbrowser.open("https://youtube.com")
@@ -145,53 +179,61 @@ def handle(q):
     elif "file" in q:
         files(q)
 
+    # FIX #9: Use root.destroy() instead of os._exit(0)
+    #         so tkinter shuts down cleanly
     elif "exit" in q:
         say("bye")
-        os._exit(0)
+        root.after(600, root.destroy)
 
     else:
         chat(q)
 
-# main loop
 def run():
+    # FIX #6: Calibrate mic noise ONCE before loop
+    set_status("Calibrating mic...")
+    try:
+        with mic as source:
+            r.adjust_for_ambient_noise(source, duration=1.5)
+    except OSError as e:
+        print(f"Mic calibration failed: {e}")
+
     say("assistant started")
 
     while True:
         set_status("Waiting...")
         result = wake()
-
-        time.sleep(0.3)
+        time.sleep(0.2)
         set_status("Processing...")
 
         if result is None:
-            q = listen()   # after "hey kate"
+            q = listen()
         else:
-            q = result     # direct command
+            q = result
 
         print("Final command:", q)
 
         if q:
             handle(q)
         else:
-            print("No command")
+            # FIX #8: Give visible feedback when nothing was heard
+            set_status("Didn't catch that — try again")
+            time.sleep(1.5)
 
         set_status("Idle")
 
-# thread
 def start():
-    t = threading.Thread(target=run)
-    t.daemon = True
+    b1.configure(state="disabled")
+    t = threading.Thread(target=run, daemon=True)
     t.start()
 
-# UI
 ctk.set_appearance_mode("dark")
 
 root = ctk.CTk()
-root.title("Assistant")
+root.title("KATE Assistant")
 root.geometry("600x500")
 
-title = ctk.CTkLabel(root, text="Assistant", font=("Arial", 35))
-title.pack(pady=10)
+title_label = ctk.CTkLabel(root, text="KATE", font=("Arial", 35))
+title_label.pack(pady=10)
 
 orb = ctk.CTkLabel(root, text="●", font=("Arial", 90), text_color="cyan")
 orb.pack()
@@ -208,7 +250,7 @@ frame.pack(pady=10)
 b1 = ctk.CTkButton(frame, text="Start", command=start)
 b1.grid(row=0, column=0, padx=10)
 
-b2 = ctk.CTkButton(frame, text="Exit", command=root.quit, fg_color="red")
+b2 = ctk.CTkButton(frame, text="Exit", command=root.destroy, fg_color="red")
 b2.grid(row=0, column=1, padx=10)
 
 root.mainloop()
