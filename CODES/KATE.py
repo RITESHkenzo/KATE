@@ -11,31 +11,37 @@ import customtkinter as ctk
 
 r = sr.Recognizer()
 r.energy_threshold = 300
-r.dynamic_energy_threshold = True
+r.dynamic_energy_threshold = False
 mic = sr.Microphone()
 
 MAX_TURNS = 10
 conversation: list[dict] = []
 
+
+# ─── UI helpers ───────────────────────────────────────────────────────────────
+
 def set_status(text: str):
     root.after(0, lambda: status.configure(text=text))
+
 
 def log(text: str):
     root.after(0, lambda: (box.insert("end", text + "\n"), box.see("end")))
 
+
+# ─── Speech ───────────────────────────────────────────────────────────────────
+
 def say(text: str):
+    """Speak text — BLOCKING so the mic doesn't open while KATE is still talking."""
     print("KATE:", text)
     log("KATE: " + text)
+    engine = pyttsx3.init()
+    engine.setProperty("rate", 170)
+    engine.say(text)
+    engine.runAndWait()          # blocks until speech is fully done
 
-    def _speak():
-        engine = pyttsx3.init()
-        engine.setProperty("rate", 170)
-        engine.say(text)
-        engine.runAndWait()
-
-    threading.Thread(target=_speak, daemon=True).start()
 
 def listen() -> str:
+    """Open the mic and return whatever was said (lowercase), or '' on failure."""
     with mic as source:
         print("Listening...")
         set_status("Listening...")
@@ -59,26 +65,39 @@ def listen() -> str:
         print(f"Recognition service error: {e}")
         return ""
 
-DIRECT_KEYWORDS = ("open", "play", "time", "google", "youtube", "file")
+
+# ─── Wake word ────────────────────────────────────────────────────────────────
+
+DIRECT_KEYWORDS = ("open", "play", "time", "google", "youtube", "file", "exit")
+
 
 def wake():
+    """
+    Loop until a wake event:
+      • "hi kate"      → returns None  (caller must listen for the command)
+      • direct keyword → returns the raw query string (already IS the command)
+    """
     while True:
+        set_status("Waiting for wake word…")
         q = listen()
-        print("Wake heard:", q)
 
         if not q:
             continue
 
-        if "hi" in q:
+        if "hi kate" in q:
             say("yes")
             return None
 
         if any(word in q for word in DIRECT_KEYWORDS):
-            print("Direct command detected")
+            print("Direct command detected:", q)
             return q
+
+
+# ─── AI chat via Ollama ───────────────────────────────────────────────────────
+
 def chat(q: str):
     global conversation
-    set_status("Thinking...")
+    set_status("Thinking…")
 
     conversation.append({"role": "user", "content": q})
 
@@ -108,14 +127,16 @@ def chat(q: str):
         print(f"HTTP error: {e}")
         say("There was an error talking to the AI.")
 
+
+# ─── Built-in commands ────────────────────────────────────────────────────────
+
 def open_app(app: str):
     if not app:
         say("Which app should I open?")
         return
     try:
-        os.startfile(app)           # Windows-native, safe
+        os.startfile(app)
     except (FileNotFoundError, OSError):
-        # fall back to subprocess with explicit args — no shell interpolation
         subprocess.Popen(["cmd", "/c", "start", "", app])
     say("opening " + app)
 
@@ -123,7 +144,6 @@ def open_app(app: str):
 def files(q: str):
     if "create file" in q:
         raw_name = q.replace("create file", "").strip()
-        # strip path separators so we can't write outside cwd
         name = os.path.basename(raw_name) + ".txt"
         if not name or name == ".txt":
             say("Please say a file name.")
@@ -141,6 +161,7 @@ def files(q: str):
         else:
             say("file not found")
 
+
 def play(q: str):
     song = q.replace("play", "").strip()
     if not song:
@@ -151,6 +172,7 @@ def play(q: str):
         shell=False
     )
     say("playing " + song)
+
 
 def handle(q: str):
     q = q.lower().strip()
@@ -179,8 +201,6 @@ def handle(q: str):
     elif "file" in q:
         files(q)
 
-    # FIX #9: Use root.destroy() instead of os._exit(0)
-    #         so tkinter shuts down cleanly
     elif "exit" in q:
         say("bye")
         root.after(600, root.destroy)
@@ -188,26 +208,29 @@ def handle(q: str):
     else:
         chat(q)
 
+
+# ─── Main loop ────────────────────────────────────────────────────────────────
+
 def run():
-    # FIX #6: Calibrate mic noise ONCE before loop
-    set_status("Calibrating mic...")
+    # Calibrate mic once before the loop
+    set_status("Calibrating mic…")
     try:
         with mic as source:
             r.adjust_for_ambient_noise(source, duration=1.5)
     except OSError as e:
         print(f"Mic calibration failed: {e}")
 
-    say("assistant started")
+    say("assistant started")        # blocks until TTS finishes — safe to listen after this
 
     while True:
-        set_status("Waiting...")
-        result = wake()
-        time.sleep(0.2)
-        set_status("Processing...")
+        result = wake()             # blocks until "hi kate" or direct keyword
+        time.sleep(0.5)             # let the mic settle after KATE's reply ("yes")
 
-        if result is None:
+        set_status("Listening for command…")
+
+        if result is None:          # woke via "hi kate" → still need to hear the command
             q = listen()
-        else:
+        else:                       # direct command already captured in wake()
             q = result
 
         print("Final command:", q)
@@ -215,16 +238,18 @@ def run():
         if q:
             handle(q)
         else:
-            # FIX #8: Give visible feedback when nothing was heard
             set_status("Didn't catch that — try again")
             time.sleep(1.5)
 
         set_status("Idle")
 
+
 def start():
     b1.configure(state="disabled")
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
+    threading.Thread(target=run, daemon=True).start()
+
+
+# ─── UI ───────────────────────────────────────────────────────────────────────
 
 ctk.set_appearance_mode("dark")
 
